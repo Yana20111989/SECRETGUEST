@@ -1,20 +1,19 @@
 #  streamlit_app.py    •    Mystery Shopper PSB  (web-GUI)
-#  Финал v1.2 – с лемматизацией (pymorphy2) и пошаговой логикой
-#  ---------------------------------------------------------------
+#  Финал v1.3 – используется st.rerun() вместо st.experimental_rerun()
+#  -------------------------------------------------------------------
 import streamlit as st
 import re, json
 from collections import deque
 from typing import List, Dict
 
-# ---------- NLP-утилита (лемматизация) --------------------------
+# ---------- NLP-утилита (лемматизация) -------------------------------
 try:
     from pymorphy2 import MorphAnalyzer
     morph = MorphAnalyzer()
-except ImportError:      # при локальном запуске без pymorphy2
+except ImportError:
     morph = None
 
 def normalize(text: str) -> str:
-    """Нижний регистр + леммы (если pymorphy2 доступна)."""
     text = re.sub(r"[^\w\s]", " ", text.lower())
     if not morph:
         return re.sub(r"\s+", " ", text).strip()
@@ -29,7 +28,7 @@ def has_any(keywords: List[str], answer: str) -> bool:
     ans = normalize(answer)
     return any(k in ans for k in keywords)
 
-# ---------- Анкета с обновлёнными критериями --------------------
+# ---------- Анкета ----------------------------------------------------
 CLIENT_NAME = "Михаил"
 
 CRITERIA: Dict[str, Dict] = json.loads("""{
@@ -88,7 +87,7 @@ CRITERIA: Dict[str, Dict] = json.loads("""{
       "6.6 Прощание+приглашение":           {"w":0.02, "kw":["до свидан","ждём","ждем","рады"]}
     }
   }
-}""")   # JSON-блок чтобы не занимать много строк кода
+}""")
 
 STAGE7_WEIGHT = 0.10
 STAGE7_TEXT = """\
@@ -98,8 +97,7 @@ STAGE7_TEXT = """\
 4. Наличие корпоративных атрибутов: платок/галстук и именной бейдж
 """
 
-# ---------- 4. Начальная и сервисная логика -------------------
-
+# ---------- вспомогательные структуры -------------------------
 def build_queue() -> deque:
     q = deque()
     for sec, data in CRITERIA.items():
@@ -113,7 +111,7 @@ def init_state():
     st.session_state.scores = {sec: 0.0 for sec in CRITERIA}
     st.session_state.stage7_done = False
     st.session_state.finished = False
-    st.session_state.history = []             # (speaker, text)
+    st.session_state.history = []
 
 if "queue" not in st.session_state:
     init_state()
@@ -121,26 +119,23 @@ if "queue" not in st.session_state:
 def add_history(who, msg):
     st.session_state.history.append((who, msg))
 
-# ---------- 5. UI (чат-интерфейс) -----------------------------
-
+# ---------- UI -------------------------------------------------
 st.title("Симулятор тайного покупателя ПСБ")
 
 for who, msg in st.session_state.history:
     st.chat_message(who).write(msg)
 
-# Стартовый реплик тайного покупателя
 if not st.session_state.history:
-    greeting = "ТП: Здравствуйте! Хочу узнать об условиях кредита на ремонт квартиры."
-    add_history("assistant", greeting)
-    st.chat_message("assistant").write(greeting)
+    greet = "ТП: Здравствуйте! Хочу узнать об условиях кредита на ремонт квартиры."
+    add_history("assistant", greet)
+    st.chat_message("assistant").write(greet)
 
-# ---------- 6. Обработка действий менеджера -------------------
-
+# ---------- логика проверки -----------------------------------
 def process_answer(ans: str):
     queue = st.session_state.queue
-    sec, crit = queue[0]           # текущий критерий
+    sec, crit = queue[0]
 
-    # --- special Stage 7 ---
+    # Stage 7
     if crit == "stage7":
         if normalize(ans) in ("да", "все", "всё"):
             st.session_state.stage7_done = True
@@ -150,7 +145,6 @@ def process_answer(ans: str):
             add_history("assistant", "⚠️  Для зачёта напишите «Да» или «Все».")
         return
 
-    # --- обычная проверка ---
     cfg = CRITERIA[sec]["items"][crit]
     ok = False
     if crit.startswith("1.4"):
@@ -167,35 +161,30 @@ def process_answer(ans: str):
     else:
         add_history("assistant", "⚠️  Информации недостаточно, дополните, пожалуйста.")
 
-# ---------- 7. Вывод текущего вопроса или финального результата
-
+# ---------- активная реплика ----------------------------------
 if st.session_state.queue:
-    current_sec, current_crit = st.session_state.queue[0]
-    if current_crit == "stage7":
-        prompt = f"ТП: Дополнительные критерии офиса:\n{STAGE7_TEXT}\nСоответствует ли всё перечисленному?"
-    else:
-        prompt = f"ТП (критерий {current_crit} секции «{current_sec}»): пожалуйста, предоставьте информацию."
-
+    cur_sec, cur_crit = st.session_state.queue[0]
+    prompt = (f"ТП: Дополнительные критерии офиса:\n{STAGE7_TEXT}\n"
+              "Соответствует ли всё перечисленному?"
+              if cur_crit == "stage7"
+              else f"ТП (критерий {cur_crit} секции «{cur_sec}»): пожалуйста, предоставьте информацию.")
     st.chat_message("assistant").write(prompt)
-    answer = st.chat_input("Введите ответ менеджера …")
-    if answer:
-        add_history("user", answer)
-        process_answer(answer)
-        st.experimental_rerun()
+
+    user_ans = st.chat_input("Введите ответ менеджера …")
+    if user_ans:
+        add_history("user", user_ans)
+        process_answer(user_ans)
+        st.rerun()
 
 else:
-    # ---------- симуляция окончена ----------
     if not st.session_state.finished:
-        total_score = sum(st.session_state.scores.values()) + (STAGE7_WEIGHT if st.session_state.stage7_done else 0)
+        total = sum(st.session_state.scores.values()) + (STAGE7_WEIGHT if st.session_state.stage7_done else 0)
         total_weight = sum(sec["weight"] for sec in CRITERIA.values()) + STAGE7_WEIGHT
-        final_pct = round(total_score / total_weight * 100, 1)
-
+        final_pct = round(total / total_weight * 100, 1)
         verdict = ("ОТЛИЧНО" if final_pct >= 90 else
                    "ХОРОШО" if final_pct >= 75 else
                    "УДОВЛЕТВОРИТЕЛЬНО" if final_pct >= 60 else
                    "НУЖНО ДОРАБОТАТЬ")
-
-        result_msg = f"Итоговая оценка менеджера: {final_pct}%  •  Статус: {verdict}"
-        add_history("assistant", result_msg)
+        add_history("assistant", f"Итоговая оценка менеджера: {final_pct}%  •  Статус: {verdict}")
         st.session_state.finished = True
-        st.experimental_rerun()
+        st.rerun()
