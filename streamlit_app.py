@@ -1,12 +1,9 @@
-#  streamlit_app.py  •  Mystery Shopper PSB  (web GUI, v2.1)
+#  streamlit_app.py  •  Mystery Shopper PSB  (web GUI, v2.2)
 #  ---------------------------------------------------------------
-#  – мизансцена и требование приветствия первым
-#  – накопление ответов менеджера
-#  – подсказка после 5 попыток
-#  – лемматизация (pymorphy2)
-#  – st.rerun() вместо experimental_rerun
-#  – правки: 2.5, перенос "обращение по имени" в 3.5 и 6.7,
-#            расширение 6.5 ключами "расчёт / просчёт"
+#  – нет критерия «обращение по имени» (убран из всех этапов)
+#  – актуальные веса разделов: 1-ОБС 0.21, 2-ВП 0.18, 3-ПР 0.20,
+#    4-ЗАЯ 0.05, 5-КРОСС 0.10, 6-ЗАВ 0.15, Stage7 0.10
+#  – остальная логика (мизансцена, подсказки, лемматизация, st.rerun) без изменений
 #  ---------------------------------------------------------------
 import streamlit as st
 import re, json
@@ -35,8 +32,6 @@ def has_any(keys: List[str], text: str) -> bool:
     return any(k in t for k in keys)
 
 # ---------- Анкета ---------------------------------------------
-CLIENT_NAME = "михаил"
-
 CRITERIA: Dict[str, Dict] = json.loads("""{
   "1. ОБСЛУЖИВАНИЕ": {
     "weight": 0.21,
@@ -61,15 +56,14 @@ CRITERIA: Dict[str, Dict] = json.loads("""{
     }
   },
   "3. ПРЕЗЕНТАЦИЯ ПРОДУКТА": {
-    "weight": 0.24,
+    "weight": 0.20,
     "items": {
       "3.1 8 требований к заёмщику":         {"w":0.08, "kw":[
           "гражданство","возраст","регистрация","проживание",
           "работа","общий","стаж","телефон"]},
       "3.2 Расчёт платежа":                  {"w":0.04, "kw":["платеж","ежемесячный"]},
       "3.3 Комфортность платежа":            {"w":0.04, "kw":["комфорт","удобно","подходит"]},
-      "3.4 Акция «лучше 0»":                 {"w":0.04, "kw":["лучше","0","ноль","акция"]},
-      "3.5 Обратился по имени":              {"w":0.04, "kw_name": true}
+      "3.4 Акция «лучше 0»":                 {"w":0.04, "kw":["лучше","0","ноль","акция"]}
     }
   },
   "4. СОЗДАНИЕ ЗАЯВКИ": {
@@ -86,15 +80,14 @@ CRITERIA: Dict[str, Dict] = json.loads("""{
     }
   },
   "6. ЗАВЕРШЕНИЕ": {
-    "weight": 0.17,
+    "weight": 0.15,
     "items": {
       "6.1 Остались вопросы":                {"w":0.02, "kw":["вопрос"]},
       "6.2 Повторная встреча":               {"w":0.03, "kw":["встреч"]},
       "6.3 Телефон":                         {"w":0.03, "kw":["телефон"]},
       "6.4 Контакты":                        {"w":0.03, "kw":["контакт"]},
       "6.5 Рекламные материалы":             {"w":0.02, "kw_any":["буклет","материал","расчёт","расчет","просчёт","просчет"]},
-      "6.6 Прощание+приглашение":            {"w":0.02, "kw_any":["до свидан","ждём","ждем","рады"]},
-      "6.7 Обратился по имени":              {"w":0.02, "kw_name": true}
+      "6.6 Прощание+приглашение":            {"w":0.02, "kw_any":["до свидан","ждём","ждем","рады"]}
     }
   }
 }""")
@@ -107,103 +100,94 @@ STAGE7_TEXT = """\
 4. Наличие корпоративных атрибутов: платок/галстук и именной бейдж
 """
 
-# ---------- служебные структуры --------------------------------
-def build_queue() -> deque:
+# ---------- состояние -----------------------------------------
+def queue_init() -> deque:
     q = deque()
-    for s, data in CRITERIA.items():
-        for c in data["items"]:
+    for s, d in CRITERIA.items():
+        for c in d["items"]:
             q.append((s, c))
     q.append(("7. ДОПОЛНИТЕЛЬНАЯ ИНФОРМАЦИЯ", "stage7"))
     return q
 
 def init():
-    st.session_state.queue       = build_queue()
-    st.session_state.scores      = {s: 0.0 for s in CRITERIA}
-    st.session_state.accum       = {}   # criterion id ➜ collected text
-    st.session_state.attempts    = {}
-    st.session_state.stage7_done = False
-    st.session_state.finished    = False
-    st.session_state.hist        = []
+    st.session_state.queue    = queue_init()
+    st.session_state.scores   = {s: 0.0 for s in CRITERIA}
+    st.session_state.accum    = {}
+    st.session_state.attempts = {}
+    st.session_state.stage7   = False
+    st.session_state.finished = False
+    st.session_state.hist     = []
 
 if "queue" not in st.session_state:
     init()
 
-def crit_id(sec, crit): return f"{sec} >> {crit}"
-
-def add(role, txt): st.session_state.hist.append((role, txt))
+def cid(sec, crit): return f"{sec} >> {crit}"
+def add(role, msg):  st.session_state.hist.append((role, msg))
 
 # ---------- UI: история ---------------------------------------
 st.title("Симулятор тайного покупателя ПСБ")
+for r, m in st.session_state.hist:
+    st.chat_message(r).write(m)
 
-for r, t in st.session_state.hist:
-    st.chat_message(r).write(t)
-
-# ---------- первая мизансцена ---------------------------------
+# ---------- стартовая мизансцена ------------------------------
 if not st.session_state.hist:
-    scene = "ТП: Клиент подошёл к окну обслуживания."
-    add("assistant", scene)
-    st.chat_message("assistant").write(scene)
+    start = "ТП: Клиент подошёл к окну обслуживания."
+    add("assistant", start)
+    st.chat_message("assistant").write(start)
 
-# ---------- проверка ответа -----------------------------------
-def process(ans: str):
+# ---------- проверка ------------------------------------------
+def check(ans: str):
     sec, crit = st.session_state.queue[0]
-    cid = crit_id(sec, crit)
-
-    # Этап 7
     if crit == "stage7":
         if normalize(ans) in ("да", "все", "всё"):
-            st.session_state.stage7_done = True
+            st.session_state.stage7 = True
             st.session_state.queue.popleft()
             add("assistant", "✅  Этап 7 зачтён. Спасибо!")
         else:
             add("assistant", "⚠️  Для зачёта ответьте «Да» или «Все».")
         return
 
-    cfg = CRITERIA[sec]["items"][crit]
-    st.session_state.accum[cid] = st.session_state.accum.get(cid, "") + " " + ans
-    st.session_state.attempts[cid] = st.session_state.attempts.get(cid, 0) + 1
-    text = st.session_state.accum[cid]
+    cfg  = CRITERIA[sec]["items"][crit]
+    cid_ = cid(sec, crit)
+    st.session_state.accum[cid_]   = st.session_state.accum.get(cid_, "") + " " + ans
+    st.session_state.attempts[cid_] = st.session_state.attempts.get(cid_, 0) + 1
+    text = st.session_state.accum[cid_]
 
-    # --- проверка ---
-    if cfg.get("kw_name"):
-        ok = CLIENT_NAME in normalize(text)
-    elif "kw_any" in cfg:
-        ok = has_any(cfg["kw_any"], text)
-    else:
-        ok = has_all(cfg["kw"], text)
+    ok = "kw_any" in cfg and has_any(cfg["kw_any"], text) or \
+         "kw"     in cfg and has_all(cfg["kw"], text)      or \
+         not cfg.get("kw")  # для пунктов без ключей
 
     if ok:
         st.session_state.scores[sec] += cfg["w"]
         st.session_state.queue.popleft()
         add("assistant", "✅  Критерий выполнен, двигаемся дальше.")
-        st.session_state.accum.pop(cid, None)
-        st.session_state.attempts.pop(cid, None)
+        st.session_state.accum.pop(cid_, None)
+        st.session_state.attempts.pop(cid_, None)
     else:
-        if st.session_state.attempts[cid] >= 5:
-            keys = cfg.get("kw_any", cfg.get("kw", ["имя клиента"]))
-            hint = " / ".join(keys)
-            add("assistant", f"💡 Подсказка: нужно упомянуть: {hint}")
+        if st.session_state.attempts[cid_] >= 5:
+            expect = " / ".join(cfg.get("kw_any", cfg.get("kw", [])))
+            add("assistant", f"💡 Подсказка: нужно упомянуть: {expect}")
         else:
-            add("assistant", "⚠️  Информации пока недостаточно, уточните ответ.")
+            add("assistant", "⚠️  Информации недостаточно, уточните ответ.")
 
-# ---------- следующая реплика ТП -------------------------------
+# ---------- реплика ТП ----------------------------------------
 if st.session_state.queue:
     sec, crit = st.session_state.queue[0]
-    prompt = (f"ТП: Дополнительные критерии офиса:\n{STAGE7_TEXT}\nСоответствует ли всё перечисленному?"
+    prompt = (f"ТП: Доп. критерии офиса:\n{STAGE7_TEXT}\nСоответствует ли всё перечисленному?"
               if crit == "stage7"
               else f"ТП (критерий {crit} секции «{sec}»): прошу информацию.")
     st.chat_message("assistant").write(prompt)
 
-    user_ans = st.chat_input("Ответ менеджера…")
-    if user_ans:
-        add("user", user_ans)
-        process(user_ans)
+    user = st.chat_input("Ответ менеджера…")
+    if user:
+        add("user", user)
+        check(user)
         st.rerun()
 
 # ---------- финал ---------------------------------------------
 else:
     if not st.session_state.finished:
-        got   = sum(st.session_state.scores.values()) + (STAGE7_WEIGHT if st.session_state.stage7_done else 0)
+        got   = sum(st.session_state.scores.values()) + (STAGE7_WEIGHT if st.session_state.stage7 else 0)
         total = sum(s["weight"] for s in CRITERIA.values()) + STAGE7_WEIGHT
         pct   = round(got / total * 100, 1)
         verdict = ("ОТЛИЧНО" if pct >= 90 else
